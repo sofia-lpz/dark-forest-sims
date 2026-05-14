@@ -13,3 +13,15 @@ class Civilization:
 
         self.is_on_planet = True
         self.is_expanding = False
+
+        self.birth_rate = 1
+        self.death_rate = 0.5
+        self.population_consumption = 1 
+
+        self.known_civilizations = []
+        self.known_civilization_coordinates = []
+
+    def move():
+        pass
+
+    
