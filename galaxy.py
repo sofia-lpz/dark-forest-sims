@@ -1,4 +1,3 @@
-
 """
 Dark Forest Simulation - Main training loop for RL agents
 """
@@ -10,26 +9,37 @@ from civ import Civilization
 class DarkGalaxy:
     """Simulation environment for dark forest civilizations"""
     
-    def __init__(self, num_planets=5, num_civilizations=2, max_steps=1000):
+    def __init__(self, num_planets=100, num_civilizations=10, max_steps=1000, grid_size = [300,300]):
         self.num_planets = num_planets
         self.num_civilizations = num_civilizations
         self.max_steps = max_steps
         self.current_step = 0
-        
+        self.grid_size = grid_size
         self.planets = []
         self.civilizations = []
         self.history = []
         
         self._initialize_environment()
+       
     
     def _initialize_environment(self):
         """Initialize planets and civilizations"""
         # Create planets with varying resources
+        occupied = set()
         for i in range(self.num_planets):
+            while True:
+                coords = (
+                    np.random.randint(0, self.grid_size[0]),
+                    np.random.randint(0, self.grid_size[1])
+                )
+                if coords not in occupied:
+                    occupied.add(coords)
+                    break
             planet = Planet(
                 name=f"Planet_{i}",
                 size=np.random.randint(50, 200),
-                resources=np.random.randint(100, 500)
+                resources=np.random.randint(100, 500),
+                coordinates=coords
             )
             self.planets.append(planet)
         
@@ -44,8 +54,10 @@ class DarkGalaxy:
             civ.science = 0
             civ.resources = 200
             
-            # Place civilization on first planet
-            self.planets[0].civilizations.append(civ)
+            # Place each civilization on a different planet
+            planet_index = i % self.num_planets
+            civ.coordinates = self.planets[planet_index].coordinates
+            self.planets[planet_index].civilizations.append(civ)
             self.civilizations.append(civ)
 
     def step(self, actions=None):
@@ -87,4 +99,3 @@ class DarkGalaxy:
         self.civilizations = []
         self.history = []
         self._initialize_environment()
-        

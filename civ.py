@@ -14,7 +14,7 @@ class Civilization:
 
         self.birth_rate = 1
         self.death_rate = 0.5
-        self.population_consumption = 1 
+        self.population_consumption = 1 # how much resources consumed by the population 
 
         self.known_civilizations = []
         self.known_civilization_coordinates = []
