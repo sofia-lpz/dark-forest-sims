@@ -7,6 +7,7 @@ import math
 from mesa import Model
 from mesa.datacollection import DataCollector
 from mesa.discrete_space import OrthogonalVonNeumannGrid
+from mesa.experimental.devs import ABMSimulator
 
 from .Civilizations import Civilization
 from .Planets import Planet
@@ -50,20 +51,36 @@ class DarkForest(Model):
             random=self.random,
         )
 
-        # Create civilizations:
+        # A civilization always needs its own planet to spawn on, so we cannot
+        # have more civilizations than planets.
+        if initial_civilizations > initial_planets:
+            raise ValueError(
+                "initial_civilizations cannot exceed initial_planets "
+                f"({initial_civilizations} > {initial_planets}): "
+                "every civilization must spawn on its own planet."
+            )
+
+        # Create planets FIRST, each on its own distinct cell. Resources are
+        # left unspecified so each planet rolls a random amount (see Planet).
+        planet_cells = self.random.sample(
+            self.grid.all_cells.cells, k=initial_planets
+        )
+        Planet.create_agents(
+            self,
+            initial_planets,
+            cell=planet_cells,
+        )
+
+        # Create civilizations: each spawns on one of the planet cells (one
+        # civilization per planet, no two sharing a planet). The Civilization
+        # constructor claims the planet sitting on its home cell.
+        home_cells = self.random.sample(planet_cells, k=initial_civilizations)
         Civilization.create_agents(
             self,
             initial_civilizations,
             name=civ_names[:initial_civilizations],
             color=self.random.choice(["red", "blue", "green"]),
-            cell=self.random.choices(self.grid.all_cells.cells, k=initial_civilizations),
-        )
-
-        # Create planets:
-        Planet.create_agents(
-            self,
-            initial_planets,
-            cell=self.random.choices(self.grid.all_cells.cells, k=initial_planets),
+            cell=home_cells,
         )
 
         # Data collector — keys must match the lineplot_component in app.py
