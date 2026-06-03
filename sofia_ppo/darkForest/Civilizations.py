@@ -7,19 +7,28 @@ BIRTH_RATE_STEP = 0.1        # how much increase_birth_rate() adds each call
 COLONIZE_COST = 50           # resources to settle an empty planet
 CONQUER_COST = 100           # resources to take an inhabited planet by force
 DESTROY_COST = 150           # resources (science weapon) to destroy a planet
+SCIENCE_PER_EXPLORE   = 1     # science per newly revealed cell
+SCIENCE_PER_BROADCAST = 5     # science per civ that newly hears your broadcast
+CONQUER_SCIENCE_FRACTION = 0.5  # share of a conquered civ's science you absorb
 
 class Civilization(CellAgent):
     """
     actions
-    explore,
+    explore, 
     increase pop birth rate,
     broadcast position,
     colonize empty planet,
     destroy planet,
     colonize inhabited planet,
+
+    rewards are given for exploring, for broadcasting,
+    for surviving, for having more population,
+    and science
+
+    punishments are given for losing population, for being destroyed, and for having less science
     """
 
-    def __init__(self, model, name, color, cell, population=0, science=0, resources=0):
+    def __init__(self, model, name, color, cell, population=0, science=0, resources=50):
         super().__init__(model)
         self.name = name
         self.color = color
@@ -109,9 +118,14 @@ class Civilization(CellAgent):
             c = getattr(planet, "cell", None)
             if c is not None:
                 origins.add(c)
+
+        before = len(self.explored_cells)
         for origin in origins:
             for c in origin.get_neighborhood(radius=radius, include_center=True):
                 self.explored_cells.add(c)
+
+        newly_explored = len(self.explored_cells) - before
+        self.science += newly_explored * SCIENCE_PER_EXPLORE
         return self.explored_cells
 
     def increase_birth_rate(self):
@@ -121,14 +135,18 @@ class Civilization(CellAgent):
 
     def broadcast_position(self):   # NOTE: your stub spelled this "boradcast_position"
         # share position with all civilizations
+        newly_reached = 0
         for civ in self._all_civilizations():
             if self not in civ.known_civilizations:
                 civ.known_civilizations.append(self)
+                newly_reached += 1
             # everyone who hears the broadcast now knows where this civ lives
             civ.explored_cells.add(self.cell)
             self.explored_cells.add(civ.cell)
             if civ not in self.known_civilizations:
                 self.known_civilizations.append(civ)
+
+        self.science += newly_reached * SCIENCE_PER_BROADCAST
 
     def colonize_empty_planet(self, cell):
         # colonize an empty planet (cell) if it's in explored_cells
@@ -183,11 +201,14 @@ class Civilization(CellAgent):
         self.resources -= CONQUER_COST
 
         if self.strength > resident.strength:
-            # win: seize the planet; if the loser is left with nothing, wipe them
-            planet.civilization = self
-            if not self._planets_of(resident):
-                self._wipe(resident)
-            return True
+                # win: absorb part of their research, then seize the planet
+                gained = resident.science * CONQUER_SCIENCE_FRACTION
+                self.science += gained
+                resident.science -= gained          # transfer; drop this line for a pure gain
+                planet.civilization = self
+                if not self._planets_of(resident):
+                    self._wipe(resident)
+                return True
         else:
             # lose: pay a population price for the failed invasion
             self.population = max(0, int(self.population * 0.75))
