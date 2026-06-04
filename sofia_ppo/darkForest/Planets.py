@@ -1,10 +1,9 @@
 class Planet:
-    """A planet that can be colonized by civilizations."""
 
     __slots__ = ("coord", "resources", "civilization", "destroyed")
 
     def __init__(self, coord, resources):
-        self.coord = coord            # (row, col)
+        self.coord = coord            
         self.resources = resources
-        self.civilization = None      # None = empty; else the owning Civilization
+        self.civilization = None      
         self.destroyed = False

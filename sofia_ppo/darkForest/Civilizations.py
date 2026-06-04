@@ -1,4 +1,3 @@
-# --- Module-level tunables (from the original) -----------------------------
 SCIENCE_PER_RANGE = 50          # science needed to extend exploration radius by 1
 BIRTH_RATE_STEP = 0.1           # how much increase_birth_rate() adds each call
 COLONIZE_COST = 50              # resources to settle an empty planet
@@ -49,8 +48,6 @@ class Civilization:
         return [p for p in self.env.planets if p.civilization is civ]
 
     def _wipe(self, civ):
-        """Remove a civilization that has lost everything. Any planets it still
-        holds revert to empty (so they can be re-colonized)."""
         civ.population = 0
         civ.alive = False
         for p in self.env.planets:
@@ -67,7 +64,6 @@ class Civilization:
 
     # --- per-step dynamics -------------------------------------------------
     def update(self):
-        # resource income from owned, intact planets (renewable harvest)
         if self.harvest_rate:
             income = sum(
                 self.harvest_rate * p.resources
@@ -76,12 +72,10 @@ class Civilization:
             )
             self.resources += income
 
-        # population births/deaths
         births = self.population * self.birth_rate
         deaths = self.population * self.death_rate
         self.population += births - deaths
 
-        # consume resources; deficits starve part of the population
         needed = self.population * self.population_consumption
         self.resources -= needed
         if self.resources < 0:
@@ -93,7 +87,7 @@ class Civilization:
         if self.population <= 0:
             self.alive = False
 
-    # --- actions (return value feeds the reward) ---------------------------
+    # --- actions  ---------------------------
     def explore(self):
         """Reveal cells within the (science-scaled) radius around every owned
         planet. Returns the number of newly explored cells."""

@@ -1,61 +1,3 @@
-"""
-Dark Forest — PettingZoo ParallelEnv (Mesa-free)
-================================================
-
-A multi-agent reinforcement-learning port of the original Mesa "Dark Forest"
-agent-based model. Each agent is a Civilization living on a toroidal grid of
-Planets. The dynamics, action set, and combat rules are preserved from the
-original code; the difference is that *which* action a civilization takes each
-turn is now chosen by a policy (e.g. MAPPO/IPPO trained with CleanRL) instead
-of being left undefined.
-
-Design choices (per request)
-----------------------------
-* API:           PettingZoo ``ParallelEnv`` (all agents act simultaneously).
-* Actions:       a single flat ``Discrete`` space + a per-step ``action_mask``.
-                 Most targeted actions are illegal most of the time (unexplored
-                 cell, no planet, can't afford), so masking is essential for PPO
-                 sample-efficiency. The mask lives in the observation.
-* Observation:   ``Dict`` with partial observability driven by exploration.
-                 A civ only "sees" cells in its ``explored_cells`` set, which
-                 grows by an exploration radius of ``1 + science // 50`` each
-                 time it explores (and via broadcasts). Enemy internals
-                 (population/science/strength) are NEVER visible — you attack
-                 without knowing if you'll win. Very on-theme for a dark forest.
-* state():       a fully-observable global state for a centralized MAPPO critic.
-* names:         parameterized; pass any list/tuple of agent names.
-
-Observation per agent (gymnasium.spaces.Dict):
-    "map":         Box(0,1, shape=(C, H, W))  channel-first, see _MAP_CHANNELS
-    "self":        Box(0,inf, shape=(8,))     own stats (see _self_vector)
-    "action_mask": MultiBinary(action_dim)    1 = legal this step
-
-Action encoding (flat Discrete):
-    0                      -> explore
-    1                      -> increase_birth_rate
-    2                      -> broadcast_position
-    3 + 0*n_cells + idx    -> colonize_empty_planet(cell)
-    3 + 1*n_cells + idx    -> destroy_planet(cell)
-    3 + 2*n_cells + idx    -> colonize_inhabited_planet(cell)
-  where n_cells = H*W and idx = row*W + col.
-
-Consuming this with CleanRL
----------------------------
-Flatten ``map`` + ``self`` as your actor/critic input, then add the action
-mask to the logits before sampling/log-prob:
-    logits = logits.masked_fill(action_mask == 0, -1e8)
-For a centralized critic, feed ``env.state()`` (concatenation of the global map
-and every civ's stats) instead of per-agent observations.
-
-Fixes vs. the original Mesa code (both tunable, revert by setting to the noted
-value):
-    * initial_population (default 10): the original spawned pop=0, so every civ
-      went extinct on step 1 (births = pop*birth_rate = 0).
-    * harvest_rate (default 0.1): the original had no resource income, so civs
-      could only ever lose resources. Set harvest_rate=0 for drain-only.
-"""
-
-from __future__ import annotations
 
 import functools
 from typing import Iterable
@@ -67,7 +9,6 @@ from pettingzoo import ParallelEnv
 from Civilizations import Civilization
 from Planets import Planet
 
-# --- Module-level tunables (from the original) -----------------------------
 SCIENCE_PER_RANGE = 50          # science needed to extend exploration radius by 1
 BIRTH_RATE_STEP = 0.1           # how much increase_birth_rate() adds each call
 COLONIZE_COST = 50              # resources to settle an empty planet
@@ -80,8 +21,6 @@ CONQUER_SCIENCE_FRACTION = 0.5  # share of a conquered civ's science you absorb
 MIN_PLANET_RESOURCES = 50       # smallest resource amount a planet can spawn with
 MAX_PLANET_RESOURCES = 200      # largest resource amount a planet can spawn with
 
-# Map channels (channel-first). Every channel is zeroed on cells the civ has
-# not explored, which is what enforces partial observability.
 _MAP_CHANNELS = (
     "explored",        # 0: 1 where this civ has explored
     "empty_planet",    # 1: explored & planet alive & unowned
@@ -97,12 +36,8 @@ A_EXPLORE, A_BIRTH, A_BROADCAST = 0, 1, 2
 N_NONTARGETED = 3
 N_TARGETED_TYPES = 3  # colonize_empty, destroy, colonize_inhabited
 
-# ---------------------------------------------------------------------------
 # The PettingZoo environment
-# ---------------------------------------------------------------------------
 class DarkForestParallelEnv(ParallelEnv):
-    """Dark Forest as a PettingZoo parallel environment."""
-
     metadata = {"render_modes": ["human", "ansi"], "name": "dark_forest_v0"}
 
     def __init__(
@@ -137,7 +72,6 @@ class DarkForestParallelEnv(ParallelEnv):
                 "every civilization must spawn on its own planet."
             )
 
-        # reward shaping (all tunable). Deltas are measured per step.
         self.reward_weights = {
             "explore": 0.1,        # per newly explored cell
             "broadcast": 0.5,      # per civ that newly hears the broadcast
@@ -155,8 +89,6 @@ class DarkForestParallelEnv(ParallelEnv):
         self.n_cells = self.height * self.width
         self.action_dim = N_NONTARGETED + N_TARGETED_TYPES * self.n_cells
 
-        # spaces are precomputed and shared per agent (PettingZoo expects the
-        # same object back on repeated calls).
         obs_space = spaces.Dict({
             "map": spaces.Box(0.0, 1.0, shape=(C, self.height, self.width),
                               dtype=np.float32),
@@ -167,7 +99,6 @@ class DarkForestParallelEnv(ParallelEnv):
         self._obs_spaces = {a: obs_space for a in self.possible_agents}
         self._act_spaces = {a: act_space for a in self.possible_agents}
 
-        # global state for a centralized critic: full map + per-civ stats.
         n = len(self.possible_agents)
         self._state_map_channels = 3 + n  # present, destroyed, resources, owner-onehot*n
         self._state_dim = (
@@ -180,7 +111,6 @@ class DarkForestParallelEnv(ParallelEnv):
         self.rng = np.random.default_rng()
         self.agents: list[str] = []
 
-    # PettingZoo wants these as methods.
     @functools.lru_cache(maxsize=None)
     def observation_space(self, agent):
         return self._obs_spaces[agent]
@@ -191,8 +121,6 @@ class DarkForestParallelEnv(ParallelEnv):
 
     # --- grid helpers ------------------------------------------------------
     def neighborhood(self, coord, radius):
-        """Von Neumann (Manhattan-distance) neighborhood on a torus, inclusive
-        of the center. Matches Mesa's OrthogonalVonNeumannGrid.get_neighborhood."""
         r0, c0 = coord
         cells = set()
         H, W = self.height, self.width
@@ -225,7 +153,7 @@ class DarkForestParallelEnv(ParallelEnv):
         ]
         self.planet_by_coord = {p.coord: p for p in self.planets}
 
-        # one civ per planet cell (sampled without replacement)
+        # one civ per planet cell 
         home_idx = self.rng.choice(len(planet_coords),
                                    size=len(self.possible_agents), replace=False)
         self.civs = {}
@@ -247,28 +175,25 @@ class DarkForestParallelEnv(ParallelEnv):
 
     # --- step --------------------------------------------------------------
     def step(self, actions):
-        acting = list(self.agents)          # agents that submit actions this step
-        self.rng.shuffle(acting)            # randomized resolution order
+        acting = list(self.agents)          
+        self.rng.shuffle(acting)
 
         rewards = {a: 0.0 for a in self.agents}
         before = {a: (self.civs[a].population, self.civs[a].science)
                   for a in self.agents}
         w = self.reward_weights
 
-        # 1) apply each agent's action (a civ wiped mid-step is skipped)
         for name in acting:
             civ = self.civs[name]
             if not civ.alive:
                 continue
             self._apply_action(civ, int(actions[name]), rewards, w)
 
-        # 2) population / resource dynamics for everyone still alive
         for name in self.agents:
             civ = self.civs[name]
             if civ.alive:
                 civ.update()
 
-        # 3) rewards from deltas, survival, and death
         alive_after = 0
         for name in self.agents:
             civ = self.civs[name]
@@ -281,7 +206,6 @@ class DarkForestParallelEnv(ParallelEnv):
             else:
                 rewards[name] -= w["destroyed"]
 
-        # 4) termination / truncation
         self.steps += 1
         truncate = self.steps >= self.max_steps
         last_civ = alive_after <= 1   # dark-forest endgame: one (or none) left
@@ -297,7 +221,6 @@ class DarkForestParallelEnv(ParallelEnv):
         infos = {a: {} for a in self.agents}
         rewards = {a: float(rewards[a]) for a in self.agents}
 
-        # prune finished agents for the next step
         self.agents = [
             a for a in self.agents
             if not (terminations[a] or truncations[a])
@@ -457,10 +380,6 @@ def env(**kwargs):
     from pettingzoo.utils import parallel_to_aec
     return parallel_to_aec(DarkForestParallelEnv(**kwargs))
 
-
-# ---------------------------------------------------------------------------
-# Self-test: API conformance + a mask-respecting random rollout
-# ---------------------------------------------------------------------------
 if __name__ == "__main__":
     from pettingzoo.test import parallel_api_test
 

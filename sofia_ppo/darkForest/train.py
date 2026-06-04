@@ -1,62 +1,4 @@
-"""
-train.py — CleanRL-style multi-agent PPO for the Dark Forest environment
-========================================================================
-
-Trains a *shared-parameter* PPO policy across all civilizations in
-``DarkForestParallelEnv`` (PettingZoo ParallelEnv). It follows CleanRL's
-single-file philosophy: one readable script, no framework, explicit PPO math.
-
-The novel part requested here is the STOPPING CRITERION. Training halts when the
-civilizations stop revealing themselves — i.e. when the *broadcast* action rate
-collapses to ~0 after having been used (the emergent "dark forest" silence) — or,
-optionally, when episodes reliably end in annihilation (the structural
-dark-forest endgame the env itself encodes as ``alive <= 1``).
-
-WHY THESE DESIGN CHOICES
-------------------------
-* Shared parameters across agents. The env is homogeneous (identical obs/action
-  spaces for every civ). One network trained on all agents' experience is far
-  more sample-efficient than N separate networks, and is the standard MAPPO/IPPO
-  setup. It also makes "self-play": every civ is the same evolving policy, which
-  is exactly what you want when probing whether a *dark forest equilibrium*
-  emerges from symmetric incentives.
-
-* Action masking. The action space is huge (3 + 3*H*W) and almost entirely
-  illegal each step. Masking the logits (set illegal -> -inf before softmax) is
-  essential for PPO to learn at all, and the env hands us the mask in the obs.
-
-* Two critic modes (``--critic``):
-    - ``independent`` (IPPO, DEFAULT): each agent's critic sees only its own
-      partial observation. This is the cleaner choice for a *competitive* game
-      like Dark Forest — agents have opposing returns, so a single shared value
-      target over a global state is ill-posed. IPPO with self-play is the
-      standard, robust baseline here.
-    - ``centralized`` (MAPPO): the critic sees the env's global ``state()`` plus
-      a one-hot agent id. Lower-variance value estimates via full observability
-      during training, decentralized (masked, partial-obs) execution. The env
-      was explicitly built to support this; use it if IPPO is too noisy.
-
-* Partial observability is preserved for the ACTOR in both modes — a civ attacks
-  without knowing enemy strength, which is what makes the dark forest a dark
-  forest. Only the (training-only) centralized critic is allowed to cheat.
-
-KNOWN SIMPLIFICATION
---------------------
-On truncation (hitting ``max_steps`` with >1 civ alive) we treat the episode as
-terminal and do not bootstrap the cut-off value. This is the same minor bias as
-vanilla CleanRL PPO; flip ``--gamma`` lower or raise ``max_steps`` if it matters.
-
-USAGE
------
-Put this file next to ``env.py``, ``Civilizations.py``, ``Planets.py`` and run:
-    pip install "pettingzoo>=1.24" "gymnasium>=0.29" torch numpy
-    python train.py                      # IPPO, default dark-forest (silence) stop
-    python train.py --critic centralized # MAPPO
-    python train.py --stop-mode either   # stop on silence OR annihilation
-TensorBoard logging is optional and auto-skips if tensorboard isn't installed.
-"""
-
-from __future__ import annotations
+#train
 
 import argparse
 import os
@@ -70,24 +12,18 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.distributions.categorical import Categorical
 
-# Make sure env.py / Civilizations.py / Planets.py (colocated) are importable.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from env import DarkForestParallelEnv, A_BROADCAST  # noqa: E402
+from env import DarkForestParallelEnv, A_BROADCAST  
 
 
-# ---------------------------------------------------------------------------
-# Args
-# ---------------------------------------------------------------------------
 def parse_args():
     p = argparse.ArgumentParser()
-    # experiment
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--torch-deterministic", action="store_true", default=True)
     p.add_argument("--cuda", action="store_true", default=True)
     p.add_argument("--run-name", type=str, default=None)
     p.add_argument("--tensorboard", action="store_true", default=False)
 
-    # env
     p.add_argument("--num-envs", type=int, default=4)
     p.add_argument("--names", type=str, nargs="+",
                    default=["Santi", "earth", "aliens"],
@@ -99,14 +35,10 @@ def parse_args():
     p.add_argument("--harvest-rate", type=float, default=0.1)
     p.add_argument("--initial-resources", type=float, default=50.0)
     p.add_argument("--initial-population", type=float, default=10.0)
-    # Smaller grids make civs meet sooner, so the *consequence* of broadcasting
-    # (being found and destroyed) shows up faster -> the dark forest can emerge
-    # in far fewer samples than on the 20x20 default.
     p.add_argument("--reward", type=str, nargs="*", default=[],
                    help="override env reward weights, e.g. "
                         "--reward broadcast=0 destroyed=50 conquer=3")
 
-    # PPO
     p.add_argument("--total-timesteps", type=int, default=1_000_000,
                    help="env transitions (num_envs*num_steps per iteration)")
     p.add_argument("--learning-rate", type=float, default=2.5e-4)
@@ -127,7 +59,6 @@ def parse_args():
     p.add_argument("--critic", choices=["independent", "centralized"],
                    default="independent")
 
-    # dark-forest stopping criterion
     p.add_argument("--stop-mode",
                    choices=["silence", "extermination", "either", "off"],
                    default="silence",
@@ -155,15 +86,9 @@ def parse_args():
     return p.parse_args()
 
 
-# ---------------------------------------------------------------------------
-# Masked categorical (illegal actions -> -inf, entropy only over legal actions)
-# ---------------------------------------------------------------------------
 class CategoricalMasked(Categorical):
     def __init__(self, logits, masks):
         masks = masks.bool()
-        # Guard: a row with no legal action would make softmax NaN. This only
-        # happens for inactive/dead-agent placeholder rows, which we mask out of
-        # the loss anyway — give them a single legal action to stay finite.
         empty = ~masks.any(dim=-1)
         if empty.any():
             masks = masks.clone()
@@ -185,9 +110,6 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     return layer
 
 
-# ---------------------------------------------------------------------------
-# Shared actor-critic
-# ---------------------------------------------------------------------------
 class Agent(nn.Module):
     def __init__(self, obs_dim, action_dim, state_dim, n_agents,
                  critic_mode, hidden=256):
@@ -221,12 +143,6 @@ class Agent(nn.Module):
                 self.get_value(obs, state, onehot).squeeze(-1))
 
 
-# ---------------------------------------------------------------------------
-# Vectorized wrapper: N homogeneous agents x num_envs, fixed slots, autoreset.
-# Returns flat obs vectors (map.flatten + self), the action mask, and the global
-# state, plus an `active` mask marking which agent slots actually acted (alive)
-# this step. Inactive slots get a placeholder obs and are masked out of the loss.
-# ---------------------------------------------------------------------------
 class MAVecEnv:
     def __init__(self, env_fns):
         self.envs = [fn() for fn in env_fns]
@@ -279,7 +195,6 @@ class MAVecEnv:
         return obs, mask, state, active
 
     def step(self, actions):
-        # actions: (num_envs, N) ints
         rewards = np.zeros((self.num_envs, self.N), dtype=np.float32)
         dones = np.zeros((self.num_envs, self.N), dtype=np.float32)
         infos = [dict() for _ in range(self.num_envs)]
@@ -288,11 +203,11 @@ class MAVecEnv:
             act = {n: int(actions[i, self._slot[n]]) for n in alive}
             obs, rew, term, trunc, _ = e.step(act)
             self._ep_len[i] += 1
-            for n in rew:                       # exactly the agents that acted
+            for n in rew:
                 slot = self._slot[n]
                 rewards[i, slot] = rew[n]
                 dones[i, slot] = float(term[n] or trunc[n])
-            if len(e.agents) == 0:              # episode finished -> autoreset
+            if len(e.agents) == 0:
                 survivors = sum(1 for c in e.civs.values() if c.alive)
                 infos[i] = {"episode_end": True,
                             "survivors": survivors,
@@ -301,7 +216,7 @@ class MAVecEnv:
                 o2, _ = e.reset()
                 self._cur[i] = dict(o2)
                 self._ep_len[i] = 0
-            else:                               # keep only still-alive civs
+            else:
                 self._cur[i] = {n: obs[n] for n in e.agents}
         nobs, nmask, nstate, nactive = self._batch()
         return nobs, nmask, nstate, rewards, dones, nactive, infos
@@ -320,21 +235,7 @@ def make_env_fn(args, idx):
     return thunk
 
 
-# ---------------------------------------------------------------------------
-# Dark-forest stopping criterion
-# ---------------------------------------------------------------------------
 class DarkForestStopper:
-    """Decides when to halt training.
-
-    'silence': the broadcast-rate EMA must first RISE to a peak (agents discover
-    broadcasting — it's rewarded early) and then COLLAPSE below a threshold and
-    stay there. That collapse is the learned dark forest: signalling your
-    position turned out to be lethal, so the policy goes quiet.
-
-    'extermination': recent episodes reliably end with <=1 survivor before the
-    time limit — the universe goes silent because everyone got wiped out.
-    """
-
     def __init__(self, args):
         self.mode = args.stop_mode
         self.min_iters = args.min_iters
@@ -353,9 +254,6 @@ class DarkForestStopper:
         self.ema = (broadcast_rate if self.ema is None
                     else self.beta * self.ema + (1 - self.beta) * broadcast_rate)
         self.peak = max(self.peak, self.ema)
-        # 'silent' if the rate is absolutely tiny OR has collapsed relative to
-        # its own peak (it oscillated 0.49<->0.51 last run and never hit 0, so a
-        # pure absolute threshold would never trigger).
         collapsed = self.peak >= self.peak_thr and self.ema <= self.rel_drop * self.peak
         silent_now = (self.ema < self.sil_thr) or collapsed
         self.silent_streak = self.silent_streak + 1 if silent_now else 0
@@ -382,10 +280,6 @@ class DarkForestStopper:
                     else f"extermination ({ann_rate:.0%})")
         return None
 
-
-# ---------------------------------------------------------------------------
-# Train
-# ---------------------------------------------------------------------------
 def main():
     args = parse_args()
     args.reward_weights = {}
@@ -396,14 +290,12 @@ def main():
     run_name = args.run_name or f"darkforest_{args.critic}_{int(time.time())}"
 
     random_seed(args.seed, args.torch_deterministic)
-    device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
-    print(f"[setup] device={device} run={run_name} critic={args.critic} "
+    print(f"[setup] run={run_name} critic={args.critic} "
           f"stop-mode={args.stop_mode}")
 
     writer = None
     if args.tensorboard:
         try:
-            from torch.utils.tensorboard import SummaryWriter
             writer = SummaryWriter(f"runs/{run_name}")
         except Exception as ex:  # noqa: BLE001
             print(f"[warn] tensorboard unavailable ({ex}); continuing without it")
@@ -412,36 +304,34 @@ def main():
     N, E = vec.N, vec.num_envs
     batch = E * N                          # rows per timestep (env x agent)
     agent = Agent(vec.obs_dim, vec.action_dim, vec.state_dim, N,
-                  args.critic, args.hidden_dim).to(device)
+                  args.critic, args.hidden_dim)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
-    # constant one-hot agent id per row (for centralized critic)
-    onehot_all = torch.zeros(batch, N, device=device)
+    onehot_all = torch.zeros(batch, N)
     for i in range(E):
         for a in range(N):
             onehot_all[i * N + a, a] = 1.0
 
-    # rollout storage, shape (num_steps, batch, ...)
     T = args.num_steps
-    obs_b = torch.zeros((T, batch, vec.obs_dim), device=device)
-    mask_b = torch.zeros((T, batch, vec.action_dim), device=device)
-    state_b = torch.zeros((T, batch, vec.state_dim), device=device)
-    act_b = torch.zeros((T, batch), dtype=torch.long, device=device)
-    logp_b = torch.zeros((T, batch), device=device)
-    val_b = torch.zeros((T, batch), device=device)
-    rew_b = torch.zeros((T, batch), device=device)
-    done_b = torch.zeros((T, batch), device=device)
-    active_b = torch.zeros((T, batch), device=device)
+    obs_b = torch.zeros((T, batch, vec.obs_dim))
+    mask_b = torch.zeros((T, batch, vec.action_dim))
+    state_b = torch.zeros((T, batch, vec.state_dim))
+    act_b = torch.zeros((T, batch), dtype=torch.long)
+    logp_b = torch.zeros((T, batch))
+    val_b = torch.zeros((T, batch))
+    rew_b = torch.zeros((T, batch))
+    done_b = torch.zeros((T, batch))
+    active_b = torch.zeros((T, batch))
 
     def to_rows(arr):  # (E, N, ...) -> (E*N, ...)
         return arr.reshape(batch, *arr.shape[2:])
 
     obs_np, mask_np, state_np, active_np = vec.reset(seed=args.seed)
-    next_obs = torch.tensor(to_rows(obs_np), device=device)
-    next_mask = torch.tensor(to_rows(mask_np), device=device)
-    next_state = torch.tensor(np.repeat(state_np, N, axis=0), device=device)
-    next_done = torch.zeros(batch, device=device)
-    next_active = torch.tensor(active_np.reshape(batch), device=device)
+    next_obs = torch.tensor(to_rows(obs_np))
+    next_mask = torch.tensor(to_rows(mask_np))
+    next_state = torch.tensor(np.repeat(state_np, N, axis=0))
+    next_done = torch.zeros(batch)
+    next_active = torch.tensor(active_np.reshape(batch))
 
     stopper = DarkForestStopper(args)
     ep_return = np.zeros(batch, dtype=np.float64)
@@ -475,13 +365,12 @@ def main():
             act_b[step] = action
             logp_b[step] = logp
 
-            # broadcast bookkeeping (only over agents that actually acted)
             act_np = action.cpu().numpy().reshape(E, N)
             n_broadcast += float(((act_np == A_BROADCAST) & (active_np > 0)).sum())
             n_active += float(active_np.sum())
 
             obs_np, mask_np, state_np, rew_np, done_np, active_np, infos = vec.step(act_np)
-            rew_b[step] = torch.tensor(rew_np.reshape(batch), device=device)
+            rew_b[step] = torch.tensor(rew_np.reshape(batch))
 
             ep_return += rew_np.reshape(batch)
             done_flat = done_np.reshape(batch)
@@ -494,17 +383,16 @@ def main():
                     surv_hist.append(info["survivors"])
                     ep_infos.append(info)
 
-            next_obs = torch.tensor(to_rows(obs_np), device=device)
-            next_mask = torch.tensor(to_rows(mask_np), device=device)
-            next_state = torch.tensor(np.repeat(state_np, N, axis=0), device=device)
-            next_done = torch.tensor(done_flat, device=device, dtype=torch.float32)
-            next_active = torch.tensor(active_np.reshape(batch), device=device)
-
+            next_obs = torch.tensor(to_rows(obs_np))
+            next_mask = torch.tensor(to_rows(mask_np))
+            next_state = torch.tensor(np.repeat(state_np, N, axis=0))
+            next_done = torch.tensor(done_flat, dtype=torch.float32)
+            next_active = torch.tensor(active_np.reshape(batch))
         # ---- GAE -------------------------------------------------------
         with torch.no_grad():
             next_value = agent.get_value(next_obs, next_state, onehot_all).squeeze(-1)
             adv = torch.zeros_like(rew_b)
-            lastgae = torch.zeros(batch, device=device)
+            lastgae = torch.zeros(batch)
             for t in reversed(range(T)):
                 if t == T - 1:
                     nonterminal = 1.0 - next_done
@@ -535,7 +423,7 @@ def main():
 
         approx_kl = torch.tensor(0.0)
         for _ in range(args.update_epochs):
-            perm = live_idx[torch.randperm(live_idx.numel(), device=device)]
+            perm = live_idx[torch.randperm(live_idx.numel())]
             for s in range(0, perm.numel(), mb_size):
                 mb = perm[s:s + mb_size]
                 _, newlogp, entropy, newval = agent.get_action_and_value(
